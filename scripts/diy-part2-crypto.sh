@@ -4,7 +4,7 @@
 #  被 diy-part2.sh 用 ". ./scripts/diy-part2-crypto.sh" source 进去。
 #
 #  ⚠ 父脚本开头是 `set -euo pipefail`，本文件在它的 shell 里跑：任何命令返回
-#    非 0 都会让 diy-part2.sh 当场退出、剩下的时区 / os-release 等步骤全不执行。
+#    非 0 都会让 diy-part2.sh 当场退出、剩下的时区 / WiFi 等步骤全不执行。
 #    所以可能失败的命令都要放进 if/|| 或包进函数 return 0，末尾显式 return 0。
 # ==============================================================================
 

@@ -3,7 +3,6 @@ name: Build PonWrt (Airoha AN758x PON)
 env:
   BUILD_ROOT: /workdir
   SOURCE: ${{ github.event.inputs.source || 'pbs05/ponwrt' }}
-  FW_AUTHOR: ${{ github.event.inputs.fw_author || 'qwe' }}
   REPO_URL: ${{ github.event.inputs.source == 'fork' && 'https://github.com/qwe-qaq/ponwrt' || 'https://github.com/pbs05/ponwrt' }}
   FEEDS_CONF: ''
   DIY_P1_SH: diy-part1.sh
@@ -27,8 +26,6 @@ env:
   PROFILE: ${{ github.event.inputs.profile || 'fiberhome_hg5585f-ct' }}
   BUILD_SCOPE: ${{ github.event.inputs.scope || 'firmware' }}
   IGNORE_CACHE: ${{ github.event.inputs.ignore_cache || 'false' }}
-  FW_BUILD_TIME: ''                 # 留空 = 自动取构建时时间（Asia/Shanghai）
-  FW_DESC_SUFFIX: ''               # 留空 = "· qwe · <构建时间>"；填了则完全自定义
   # 固件文件名插入构建时间戳。下划线无冒号：upload-artifact 拒绝 `: " < > | * ?`。
   # 改名后同名覆盖失效，旧资产会累积在同一个 Release，需手动清理。
   FW_TS_NAME: 'true'
@@ -143,10 +140,6 @@ on:
         options:
           - 'true'
           - 'false'
-      fw_author:
-        description: '覆盖固件版本后缀的作者名（LuCI 概览页「固件版本」）。留空 = qwe'
-        required: false
-        default: 'qwe'
       upload_release:
         description: '固件发布到 Release（false 则只传 Artifact）'
         required: false
@@ -241,7 +234,6 @@ jobs:
           echo "Source   : ${SOURCE} (${REPO_URL})"
           echo "Branch   : ${REPO_BRANCH}"
           echo "Scope    : ${BUILD_SCOPE}"
-          echo "Author   : ${FW_AUTHOR}"
           echo "Crypto   : ARM64CE=${OPT_CRYPTO_ARM64CE} CHACHA=${OPT_CRYPTO_CHACHA} EIP93=${OPT_CRYPTO_EIP93}"
           echo "========================================"
 
@@ -295,9 +287,6 @@ jobs:
           df -hT "$PWD"
           git clone "$REPO_URL" -b "$REPO_BRANCH" --single-branch --depth=1 openwrt
           ln -sf "$BUILD_ROOT/openwrt" "$GITHUB_WORKSPACE/openwrt"
-
-          # 输入为空时回退默认值，别让 diy-part2.sh 拿到空串
-          echo "FW_AUTHOR=${FW_AUTHOR:-qwe}" >> "$GITHUB_ENV"
 
           echo "OPT_CRYPTO_ARM64CE=${OPT_CRYPTO_ARM64CE}" >> "$GITHUB_ENV"
           echo "OPT_CRYPTO_CHACHA=${OPT_CRYPTO_CHACHA}" >> "$GITHUB_ENV"
@@ -664,13 +653,13 @@ jobs:
             echo "已裁剪为: CONFIG_TARGET_DEVICE_airoha_${SOC}_DEVICE_${PROFILE}=y"
           fi
 
-      # diy-part2.sh：时区 + 固件版本后缀，加密可选包也在这里注入。
+      # diy-part2.sh：时区 + 5G WiFi + 概览页 CPU，加密可选包也在这里注入。
+      # 固件版本信息保持源码默认，不追加作者/构建时间后缀。
       # 必须早于 defconfig，否则写进 .config 的符号会被重新展开覆盖。
       - name: Set timezone to China (diy-part2.sh)
         run: |
           cd "$BUILD_ROOT/openwrt"
           chmod +x "$GITHUB_WORKSPACE/$DIY_P2_SH"
-          FW_AUTHOR="$FW_AUTHOR" FW_BUILD_TIME="$FW_BUILD_TIME" FW_DESC_SUFFIX="$FW_DESC_SUFFIX" \
           WIFI_5G_COUNTRY="$WIFI_5G_COUNTRY" WIFI_5G_CHANNEL="$WIFI_5G_CHANNEL" \
           WIFI_5G_HTMODE="$WIFI_5G_HTMODE" WIFI_5G_FALLBACK="$WIFI_5G_FALLBACK" \
             "$GITHUB_WORKSPACE/$DIY_P2_SH"
@@ -1534,7 +1523,6 @@ jobs:
             echo "|------|------|"
             echo "| 机型 | \`${PROFILE}\` |"
             echo "| SoC | \`${SOC}\` |"
-            echo "| 作者 | \`${FW_AUTHOR}\` |"
             echo "| 源码 | ${REPO_URL} |"
             echo "| 分支 | \`${REPO_BRANCH}\` |"
             echo "| 提交 | \`$(cd "$BUILD_ROOT"/openwrt && git rev-parse --short HEAD)\` |"

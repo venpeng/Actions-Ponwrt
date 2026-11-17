@@ -2,7 +2,8 @@
 # ================================================================
 # diy-part2.sh —— 默认值定制（.config 加载后运行，cwd = ponwrt 根）
 #   1) 时区 CST-8 / Asia/Shanghai   2) 5G WiFi：CN / auto / HE160
-#   3) 概览页 CPU 行 USR/SYS + 每核   4) 固件版本追加作者与构建时间
+#   3) 概览页 CPU 行 USR/SYS + 每核
+#   固件版本信息保持源码默认，不追加作者/构建时间后缀。
 # ================================================================
 
 set -euo pipefail
@@ -17,13 +18,7 @@ WIFI_5G_CHANNEL="${WIFI_5G_CHANNEL:-auto}"     # 信道（auto = 自动选择）
 WIFI_5G_HTMODE="${WIFI_5G_HTMODE:-HE160}"      # 160MHz（WiFi6）；回落 HE80
 WIFI_5G_FALLBACK="${WIFI_5G_FALLBACK:-HE80}"   # 硬件不支持 160MHz 时的回落值
 
-# 可由 workflow 的 fw_author 输入项覆盖（经 env 注入）；本地单独跑时默认 qwe
-FW_AUTHOR="${FW_AUTHOR:-qwe}"
-FW_BUILD_TIME="${FW_BUILD_TIME:-}"
-FW_DESC_SUFFIX="${FW_DESC_SUFFIX:-}"
-
 echo "配置：5G country=$WIFI_5G_COUNTRY channel=$WIFI_5G_CHANNEL htmode=$WIFI_5G_HTMODE fallback=$WIFI_5G_FALLBACK"
-echo "配置：FW_AUTHOR=$FW_AUTHOR"
 
 # 1. 改 config_generate 默认值（首次开机生成的 /etc/config/system）
 CFG="package/base-files/files/bin/config_generate"
@@ -186,41 +181,11 @@ else
   echo "::warning::未找到 $PATCH_CPUUSAGE，跳过概览页 CPU 使用率行定制"
 fi
 
-[ -z "$FW_BUILD_TIME" ] && FW_BUILD_TIME="$(TZ="${TZ:-Asia/Shanghai}" date '+%Y-%m-%d %H:%M')"
-
-VER_CODE="$(sed -n 's/^CONFIG_VERSION_CODE="\(.*\)"$/\1/p' .config 2>/dev/null || true)"
-if [ -n "$VER_CODE" ]; then
-  DESC_BODY='%D %V %C'
-else
-  DESC_BODY='%D %V'
-fi
-[ -z "$FW_DESC_SUFFIX" ] && FW_DESC_SUFFIX="· ${FW_AUTHOR} · ${FW_BUILD_TIME}"
-
-RELEASE_TPL="package/base-files/files/etc/openwrt_release"
-OSREL_TPL="package/base-files/files/usr/lib/os-release"
-
-# 用 perl + 环境变量传文本：作者名带 / | # & 也不会破坏语法（sed 会炸）
-FW_DESC_LINE="DISTRIB_DESCRIPTION='${DESC_BODY} ${FW_DESC_SUFFIX}'"
-OSREL_LINE="OPENWRT_RELEASE=\"${DESC_BODY} ${FW_DESC_SUFFIX}\""
-export FW_DESC_LINE OSREL_LINE
-
-if [ -f "$RELEASE_TPL" ]; then
-  # 只替换 DISTRIB_DESCRIPTION 行，不动 DISTRIB_ID / DISTRIB_RELEASE 等其它行
-  perl -i -pe 's/^DISTRIB_DESCRIPTION=.*/$ENV{FW_DESC_LINE}/' "$RELEASE_TPL"
-  echo "✅ 固件版本模板 -> $FW_DESC_LINE"
-else
-  echo "::warning::未找到 $RELEASE_TPL，固件版本不会带构建信息"
-fi
-
-# os-release 同步（部分工具/LuCI 版本读它；%B 只是 SOURCE_DATE_EPOCH 时间戳，不好看）
-if [ -f "$OSREL_TPL" ]; then
-  perl -i -pe 's/^OPENWRT_RELEASE=.*/$ENV{OSREL_LINE}/' "$OSREL_TPL"
-  echo "✅ os-release 同步 -> $OSREL_LINE"
-fi
+# 固件版本信息（DISTRIB_DESCRIPTION / OPENWRT_RELEASE）保持源码默认，不做改写。
 
 # 用 -f 不用 -x：git checkout / Windows 打包会丢可执行位。
 # || true：本文件是 set -euo pipefail，子脚本返回非 0 会让整轮构建中断，
 # 而加密只是可选增强。
 [ -f scripts/diy-part2-crypto.sh ] && . ./scripts/diy-part2-crypto.sh || true
 
-echo "🎉 diy-part2.sh 执行完毕 (author=$FW_AUTHOR)"
+echo "🎉 diy-part2.sh 执行完毕"
