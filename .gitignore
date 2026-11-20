@@ -5,5 +5,5 @@
 *.log
 *.pyc
 __pycache__/
-!/.workbuddy/
-!/.idea/
+.idea/
+.workbuddy/
