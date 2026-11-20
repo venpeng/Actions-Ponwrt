@@ -7,6 +7,7 @@ env:
   FEEDS_CONF: ''
   DIY_P1_SH: diy-part1.sh
   DIY_P2_SH: diy-part2.sh
+  DIY_P3_SH: diy-part3.sh
   UPLOAD_BIN_DIR: false
   UPLOAD_FIRMWARE: true
   UPLOAD_RELEASE: ${{ github.event.inputs.upload_release || 'true' }}
@@ -26,6 +27,7 @@ env:
   PROFILE: ${{ github.event.inputs.profile || 'fiberhome_hg5585f-ct' }}
   BUILD_SCOPE: ${{ github.event.inputs.scope || 'firmware' }}
   IGNORE_CACHE: ${{ github.event.inputs.ignore_cache || 'false' }}
+  EXTRA_PLUGINS: ${{ github.event.inputs.extra_plugins || 'false' }}
   # 固件文件名插入构建时间戳。下划线无冒号：upload-artifact 拒绝 `: " < > | * ?`。
   # 改名后同名覆盖失效，旧资产会累积在同一个 Release，需手动清理。
   FW_TS_NAME: 'true'
@@ -107,6 +109,15 @@ on:
         options:
           - '0'
           - '1'
+
+      extra_plugins:
+        description: '编译额外插件（autocore / automount / DDNS / HomeProxy / ttyd / UPnP / 微信推送 / WOL / argon 主题 / Cloudflare DDNS）'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
 
       scope:
         description: '构建范围 (toolchain-only 仅预热工具链缓存)'
@@ -255,6 +266,7 @@ jobs:
           echo "Source   : ${SOURCE} (${REPO_URL})"
           echo "Branch   : ${REPO_BRANCH}"
           echo "Scope    : ${BUILD_SCOPE}"
+          echo "Plugins  : extra=${EXTRA_PLUGINS}"
           echo "Crypto   : ARM64CE=${OPT_CRYPTO_ARM64CE} CHACHA=${OPT_CRYPTO_CHACHA} EIP93=${OPT_CRYPTO_EIP93}"
           echo "========================================"
 
@@ -695,6 +707,15 @@ jobs:
           echo "WANT_CHACHA=${OPT_CRYPTO_CHACHA}"   >> "$GITHUB_ENV"
           echo "WANT_EIP93=${OPT_CRYPTO_EIP93}"     >> "$GITHUB_ENV"
 
+      # diy-part3.sh：可选额外插件（开关 extra_plugins，默认 false 不执行）。
+      # 与 diy-part2.sh 一样必须早于 defconfig，否则写进 .config 的 =y 会被重新展开剔除。
+      - name: Add optional extra plugins (diy-part3.sh)
+        if: env.EXTRA_PLUGINS == 'true'
+        run: |
+          cd "$BUILD_ROOT/openwrt"
+          chmod +x "$GITHUB_WORKSPACE/$DIY_P3_SH"
+          EXTRA_PLUGINS="$EXTRA_PLUGINS" "$GITHUB_WORKSPACE/$DIY_P3_SH"
+
       # 用 runner 预装的 Go/Rust 替代源码编译（prebuilt_host=true）。
       # 必须在 defconfig 之前 —— 脚本写进 .config 的项要由 defconfig 展开。
       # 全部软失败：ponwrt 不支持时只 warning，退回源码编译。
@@ -920,6 +941,24 @@ jobs:
             echo "        改 configs/${PROFILE}.config：写成 CONFIG_PACKAGE_<名>=y，行首不要带 #"
           else
             echo "✅ 代理插件校验通过（passwall / xray / sing-box 均为 =y）"
+          fi
+
+          # 额外插件复核（只警告）：开关开启时，defconfig 会静默剔除 feeds 里
+          # 不存在的包，这里只提示哪几个没进来，不阻断构建。
+          if [ "${EXTRA_PLUGINS}" = "true" ]; then
+            EXTRA_MISS=""
+            for p in autocore automount luci-app-autoreboot luci-app-ddns \
+                     luci-app-homeproxy luci-app-ttyd luci-app-upnp \
+                     luci-app-wechatpush luci-app-wol luci-theme-argon \
+                     ddns-scripts-cloudflare; do
+              grep -qx "CONFIG_PACKAGE_${p}=y" .config || EXTRA_MISS="$EXTRA_MISS $p"
+            done
+            if [ -n "$EXTRA_MISS" ]; then
+              echo "::warning::以下额外插件未进入 .config:$EXTRA_MISS"
+              echo "        原因通常是当前源码树 feeds 里没有该包（defconfig 会静默删符号）"
+            else
+              echo "✅ 额外插件校验通过（11 项全部 =y）"
+            fi
           fi
 
           # 中文包（po 注入后才存在，缺失只警告不阻断）
