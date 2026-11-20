@@ -111,7 +111,7 @@ on:
           - '1'
 
       extra_plugins:
-        description: '编译额外插件（autocore / automount / DDNS / HomeProxy / ttyd / UPnP / 微信推送 / WOL / argon 主题 / Cloudflare DDNS）'
+        description: '编译额外插件'
         required: false
         default: 'false'
         type: choice
