@@ -636,6 +636,19 @@ jobs:
           chmod +x "$GITHUB_WORKSPACE/$DIY_P1_SH"
           "$GITHUB_WORKSPACE/$DIY_P1_SH"
 
+      # fitblk 在源码里是 HIDDEN 包（Kconfig 无 prompt），机型配置里写的
+      # CONFIG_PACKAGE_fitblk=y 会被 defconfig 直接丢弃（符号整个消失）；
+      # 但各机型 DEVICE_PACKAGES 都引用它，apk 组装镜像不会跳过缺包，
+      # target/linux install 阶段会硬失败。去掉 HIDDEN 恢复成可选包后，
+      # 配置里的 =y 才会生效，依赖 fit-check-sign 也会由 Kconfig select 带出。
+      - name: Un-hide fitblk package (source patch)
+        run: |
+          cd "$BUILD_ROOT/openwrt"
+          S="$GITHUB_WORKSPACE/scripts/patch-fitblk-prompt.sh"
+          [ -f "$S" ] || { echo "::warning::缺 $S，跳过 fitblk 补丁"; exit 0; }
+          dos2unix "$S" 2>/dev/null || true
+          sh "$S" "$BUILD_ROOT/openwrt"
+
       # 摘掉 cargo 的 --frozen/--offline：dl/cargo 缓存只增不减，
       # 上游加新依赖时缓存里没有，不留联网补救会直接编挂。--locked 保留。
       - name: Relax cargo offline flags
@@ -687,13 +700,18 @@ jobs:
             echo "全机型编译，不做裁剪"
           else
             # 清掉所有设备选中项（含 is not set 行），再单独打开目标机型
-            sed -i '/CONFIG_TARGET_DEVICE_/d; /^CONFIG_TARGET_MULTI_PROFILE=/d' .config
+            sed -i "/CONFIG_TARGET_DEVICE_/d; /^CONFIG_TARGET_MULTI_PROFILE=/d; /^CONFIG_TARGET_airoha_${SOC}_DEVICE_/d" .config
             {
               echo "CONFIG_TARGET_MULTI_PROFILE=y"
               echo "CONFIG_TARGET_DEVICE_airoha_${SOC}_DEVICE_${PROFILE}=y"
+              # 兜底：源码里 TARGET_MULTI_PROFILE 依赖 HAS_DEVICES，defconfig 有可能
+              # 把它连同整个「Target Devices」菜单展开掉，choice 回落到默认机型
+              # （airoha_an7581-evb-multievb）。同时写单机型 choice 符号后，
+              # Kconfig 无论保留哪种模式，DEVICE_CHECK_PROFILE 都能命中目标机型。
+              echo "CONFIG_TARGET_airoha_${SOC}_DEVICE_${PROFILE}=y"
               echo "CONFIG_TARGET_DEVICE_PACKAGES_airoha_${SOC}_DEVICE_${PROFILE}=\"\""
             } >> .config
-            echo "已裁剪为: CONFIG_TARGET_DEVICE_airoha_${SOC}_DEVICE_${PROFILE}=y"
+            echo "已裁剪为: CONFIG_TARGET_DEVICE_airoha_${SOC}_DEVICE_${PROFILE}=y（含单机型兜底）"
           fi
 
       # diy-part2.sh：时区 + 5G WiFi + 概览页 CPU，加密可选包也在这里注入。
@@ -910,11 +928,13 @@ jobs:
                   grep -nE '^(# )?CONFIG_PACKAGE_(mtwifi-cfg|ucode|ucode-mod-|iwinfo-ucode|datconf|libl1parser|libkvcutil|kvcedit|l1util|wifi-scripts|mwctl)' .config 2>/dev/null | head -30 | sed 's/^/       /' || echo "       (无)"
                   echo "    lua 版冲突包 mtwifi-cfg: $(grep -E '^(# )?CONFIG_PACKAGE_mtwifi-cfg[ =]' .config 2>/dev/null | head -2 | tr '\n' ' ' || echo '(符号不存在)')"
                 done
-                echo "--- 两种成因 ---"
+                echo "--- 三种成因 ---"
                 echo "  A) 包确实不存在/被 feeds 剔除 → tmp/.packageinfo 里是 0 条"
                 echo "  B) 包存在但符号没被 default y 带起来 → 元数据陈旧（tmp/ 残留）"
+                echo "  C) 包是 HIDDEN（Makefile 里 HIDDEN:=1）→ Kconfig 无 prompt，.config 里写 =y 会被丢弃"
                 echo "临时解: 在 configs/${PROFILE}.config 里补 CONFIG_PACKAGE_<包>=y"
                 echo "根治:   rm -rf tmp/ 后重跑 defconfig（.packageinfo / .config-package.in 都会重建）"
+                echo "HIDDEN: 需先解除包 Makefile 里的 HIDDEN:=1（fitblk 由 scripts/patch-fitblk-prompt.sh 处理）"
                 exit 1
               fi
               echo "✅ 设备包校验通过（${CHK} 个 DEVICE_PACKAGES 全部能被编出来）"
@@ -1040,13 +1060,32 @@ jobs:
             fi
           fi
 
-          # 机型校验: 机型名写错时直接失败，避免静默全编译
+          # 机型校验: 单/多机型两种模式都接受。
+          # 源码里 TARGET_MULTI_PROFILE 依赖 HAS_DEVICES（由 subtarget 的 select 提供），
+          # defconfig 在部分环境下会把它连同整个「Target Devices」菜单展开掉，choice
+          # 回落到默认机型。Apply device profile 已同时写单机型符号，因此这里命中
+          # 任意一个即算通过 —— 不再事后改 .config，避免和 Kconfig 打架。
           if [ "${PROFILE}" != "all" ]; then
-            if ! grep -q "^CONFIG_TARGET_DEVICE_airoha_${SOC}_DEVICE_${PROFILE}=y" .config; then
+            DEV_SYM="CONFIG_TARGET_DEVICE_airoha_${SOC}_DEVICE_${PROFILE}"
+            SINGLE_SYM="CONFIG_TARGET_airoha_${SOC}_DEVICE_${PROFILE}"
+
+            if grep -qx "${DEV_SYM}=y" .config; then
+              echo "机型校验通过: ${PROFILE}（多机型模式）"
+            elif grep -qx "${SINGLE_SYM}=y" .config; then
+              echo "机型校验通过: ${PROFILE}（单机型模式）"
+              echo "::warning::defconfig 关闭了 TARGET_MULTI_PROFILE（choice 落到单机型），已由单机型符号命中目标设备；本次按单机型模式出固件"
+            else
               echo "::error::机型 ${PROFILE} 在 ${SOC} 下不存在，请检查 profile 名称"
+              echo "--- .config 里的 TARGET / HAS 相关行 ---"
+              TGT_LINES="$(grep -nE "CONFIG_(HAS_DEVICES|HAS_SUBTARGETS|TARGET_(DEVICE_|MULTI_PROFILE|PER_DEVICE_ROOTFS|ALL_PROFILES|airoha_(an7581|an7583|en7523)))" .config | head -25 || true)"
+              if [ -n "$TGT_LINES" ]; then printf '%s\n' "$TGT_LINES" | sed 's/^/    /'; else echo "    (无)"; fi
+              echo "--- tmp/.config-target.in 里的符号（Kconfig 无 CONFIG_ 前缀）---"
+              K_MULTI="${DEV_SYM#CONFIG_}"
+              K_SINGLE="${SINGLE_SYM#CONFIG_}"
+              printf '    %s: %s 条\n' "$K_MULTI" "$(grep -c "^[[:space:]]*menuconfig ${K_MULTI}\$" tmp/.config-target.in 2>/dev/null || true)"
+              printf '    %s: %s 条\n' "$K_SINGLE" "$(grep -c "^[[:space:]]*config ${K_SINGLE}\$" tmp/.config-target.in 2>/dev/null || true)"
               exit 1
             fi
-            echo "机型校验通过: ${PROFILE}"
           fi
 
           echo "CONFIG_TARGET_BOARD=$(grep '^CONFIG_TARGET_BOARD=' .config | cut -d'"' -f2)"
