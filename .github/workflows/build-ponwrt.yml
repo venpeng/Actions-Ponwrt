@@ -7,7 +7,6 @@ env:
   FEEDS_CONF: ''
   DIY_P1_SH: diy-part1.sh
   DIY_P2_SH: diy-part2.sh
-  DIY_P3_SH: diy-part3.sh
   UPLOAD_BIN_DIR: false
   UPLOAD_FIRMWARE: true
   UPLOAD_RELEASE: ${{ github.event.inputs.upload_release || 'true' }}
@@ -28,9 +27,6 @@ env:
   BUILD_SCOPE: ${{ github.event.inputs.scope || 'firmware' }}
   IGNORE_CACHE: ${{ github.event.inputs.ignore_cache || 'false' }}
   EXTRA_PLUGINS: ${{ github.event.inputs.extra_plugins || 'false' }}
-  # 固件文件名插入构建时间戳。下划线无冒号：upload-artifact 拒绝 `: " < > | * ?`。
-  # 改名后同名覆盖失效，旧资产会累积在同一个 Release，需手动清理。
-  FW_TS_NAME: 'true'
   OPT_CRYPTO_ARM64CE: ${{ github.event.inputs.opt_arm64ce == '1' && '1' || '0' }}
   OPT_CRYPTO_CHACHA:  ${{ github.event.inputs.opt_chacha  == '1' && '1' || '0' }}
   OPT_CRYPTO_EIP93:   ${{ github.event.inputs.opt_eip93   == '1' && '1' || '0' }}
@@ -266,7 +262,7 @@ jobs:
           echo "Source   : ${SOURCE} (${REPO_URL})"
           echo "Branch   : ${REPO_BRANCH}"
           echo "Scope    : ${BUILD_SCOPE}"
-          echo "Plugins  : extra=${EXTRA_PLUGINS}"
+          echo "Plugins  : extra=${EXTRA_PLUGINS}（清单 configs/extra-packages.config）"
           echo "Crypto   : ARM64CE=${OPT_CRYPTO_ARM64CE} CHACHA=${OPT_CRYPTO_CHACHA} EIP93=${OPT_CRYPTO_EIP93}"
           echo "========================================"
 
@@ -692,6 +688,39 @@ jobs:
             exit 1
           fi
 
+          # 额外插件：configs/extra-packages.config 是 kconfig / diffconfig 语法，
+          # 一行一个 CONFIG_符号=值，逐条写进 .config（等价于手工 menuconfig）。
+          # 开关开/关都要写：关 = 逐条写成 "not set"，否则机型 config 里残留的 =y
+          # 会让「已关闭额外插件」看起来没生效。必须在 defconfig 之前。
+          EXTRA_CONF="$GITHUB_WORKSPACE/configs/extra-packages.config"
+          if [ ! -f "$EXTRA_CONF" ]; then
+            echo "::warning::未找到 configs/extra-packages.config，跳过额外插件"
+          else
+            if [ "${EXTRA_PLUGINS}" = "true" ]; then EXTRA_MODE=on; else EXTRA_MODE=off; fi
+            EXTRA_CNT=0
+            while IFS= read -r line || [ -n "$line" ]; do
+              line="${line%$'\r'}"                      # Windows 编辑器存成 CRLF 时去掉尾部 CR
+              case "$line" in ''|\#*) continue ;; esac  # 空行与注释
+              sym="${line%%=*}"
+              val="${line#*=}"
+              if [ "$sym" = "$line" ]; then             # 没有 = 号，不是赋值行
+                echo "::warning::清单里有无法解析的行，已跳过: $line"
+                continue
+              fi
+              if [ "$EXTRA_MODE" = "off" ]; then val=n; fi
+              # 先删同名旧行（"SYM=值" 与 "# SYM is not set" 两种形态）再追加：
+              # 留下重复行时 defconfig / diffconfig 以最后一行为准，人工排查易误判
+              sed -i "\|^${sym}=|d; \|^# ${sym} is not set$|d" .config
+              if [ "$val" = "n" ]; then
+                echo "# ${sym} is not set" >> .config
+              else
+                echo "${sym}=${val}" >> .config
+              fi
+              EXTRA_CNT=$((EXTRA_CNT + 1))
+            done < "$EXTRA_CONF"
+            echo "✅ 额外插件: ${EXTRA_MODE}（清单 ${EXTRA_CNT} 项，来源 configs/extra-packages.config）"
+          fi
+
       - name: Apply device profile
         run: |
           cd "$BUILD_ROOT/openwrt"
@@ -729,15 +758,6 @@ jobs:
           echo "WANT_ARM64CE=${OPT_CRYPTO_ARM64CE}" >> "$GITHUB_ENV"
           echo "WANT_CHACHA=${OPT_CRYPTO_CHACHA}"   >> "$GITHUB_ENV"
           echo "WANT_EIP93=${OPT_CRYPTO_EIP93}"     >> "$GITHUB_ENV"
-
-      # diy-part3.sh：可选额外插件（开关 extra_plugins，默认 false 不执行）。
-      # 与 diy-part2.sh 一样必须早于 defconfig，否则写进 .config 的 =y 会被重新展开剔除。
-      - name: Add optional extra plugins (diy-part3.sh)
-        if: env.EXTRA_PLUGINS == 'true'
-        run: |
-          cd "$BUILD_ROOT/openwrt"
-          chmod +x "$GITHUB_WORKSPACE/$DIY_P3_SH"
-          EXTRA_PLUGINS="$EXTRA_PLUGINS" "$GITHUB_WORKSPACE/$DIY_P3_SH"
 
       # 用 runner 预装的 Go/Rust 替代源码编译（prebuilt_host=true）。
       # 必须在 defconfig 之前 —— 脚本写进 .config 的项要由 defconfig 展开。
@@ -1013,21 +1033,41 @@ jobs:
             echo "✅ 代理插件校验通过（passwall / xray / sing-box 均为 =y）"
           fi
 
-          # 额外插件复核（只警告）：开关开启时，defconfig 会静默剔除 feeds 里
-          # 不存在的包，这里只提示哪几个没进来，不阻断构建。
-          if [ "${EXTRA_PLUGINS}" = "true" ]; then
-            EXTRA_MISS=""
-            for p in autocore automount luci-app-autoreboot luci-app-ddns \
-                     luci-app-homeproxy luci-app-ttyd luci-app-upnp \
-                     luci-app-wechatpush luci-app-wol luci-theme-argon \
-                     ddns-scripts-cloudflare; do
-              grep -qx "CONFIG_PACKAGE_${p}=y" .config || EXTRA_MISS="$EXTRA_MISS $p"
-            done
-            if [ -n "$EXTRA_MISS" ]; then
-              echo "::warning::以下额外插件未进入 .config:$EXTRA_MISS"
-              echo "        原因通常是当前源码树 feeds 里没有该包（defconfig 会静默删符号）"
+          # 额外插件复核（只警告）。清单以 configs/extra-packages.config 为唯一来源，
+          # 不在 workflow 里维护第二份包名列表 —— 两份迟早会漂移。
+          # 开：defconfig 会静默剔除 feeds 里没有的包，这里列出没进 .config 的；
+          # 关：确认没有漏网的 =y（机型 config 里残留同名 =y 时，这里能抓到）。
+          EXTRA_CONF="$GITHUB_WORKSPACE/configs/extra-packages.config"
+          if [ -f "$EXTRA_CONF" ]; then
+            EXTRA_PKGS=$(tr -d '\r' < "$EXTRA_CONF" \
+              | grep -E '^CONFIG_PACKAGE_[A-Za-z0-9_+-]+=' \
+              | sed 's/^CONFIG_PACKAGE_//; s/=.*$//' || true)
+            EXTRA_N=$(echo "$EXTRA_PKGS" | wc -w)
+            if [ "${EXTRA_PLUGINS}" = "true" ]; then
+              EXTRA_MISS=""
+              for p in $EXTRA_PKGS; do
+                if ! grep -qx "CONFIG_PACKAGE_${p}=y" .config; then
+                  EXTRA_MISS="$EXTRA_MISS $p"
+                fi
+              done
+              if [ -n "$EXTRA_MISS" ]; then
+                echo "::warning::以下额外插件未进入 .config:$EXTRA_MISS"
+                echo "        原因通常是当前源码树 feeds 里没有该包（defconfig 会静默删符号）"
+              else
+                echo "✅ 额外插件校验通过（清单 $EXTRA_N 项全部 =y）"
+              fi
             else
-              echo "✅ 额外插件校验通过（11 项全部 =y）"
+              EXTRA_LEFT=""
+              for p in $EXTRA_PKGS; do
+                if grep -qx "CONFIG_PACKAGE_${p}=y" .config; then
+                  EXTRA_LEFT="$EXTRA_LEFT $p"
+                fi
+              done
+              if [ -n "$EXTRA_LEFT" ]; then
+                echo "::warning::开关已关，但这些包仍是 =y:$EXTRA_LEFT（清单的 not set 没写进 .config？）"
+              else
+                echo "✅ 额外插件已关闭（清单 $EXTRA_N 项均 not set）"
+              fi
             fi
           fi
 
@@ -1616,90 +1656,23 @@ jobs:
         run: |
           cd "$BUILD_ROOT"/openwrt/bin/targets/*/*
           rm -rf packages
-          echo "FIRMWARE=$PWD" >> "$GITHUB_ENV"
-          echo "status=success" >> "$GITHUB_OUTPUT"
 
-      # 只给主固件加时间戳：<名>-2026-11-13_133226(Shanghai).itb。
-      # 冒号会让 upload-artifact 整包失败；其余产物保持原名，刷机脚本/文档引用的名字不用动。
-      - name: Stamp firmware filenames with build time
-        id: stamp
-        if: steps.organize.outputs.status == 'success' && env.FW_TS_NAME == 'true'
-        run: |
-          cd "$FIRMWARE"
-
-          # 2026-11-13 13:32:26 → 2026-11-13_133226(Shanghai)
-          NOW=$(date '+%Y-%m-%d %H:%M:%S')
-          DATE_PART=${NOW%% *}
-          TIME_PART=${NOW#* }
-          TS="${DATE_PART}_${TIME_PART//:/}(Shanghai)"
-
-          echo "FW_TS=${TS}" >> "$GITHUB_ENV"
-          echo "本次文件名时间戳: ${TS}"
-
-          # 只动 sysupgrade 的 .itb；factory.bin / ubi / manifest 一律原名
-          ONLY_OLD=""; ONLY_NEW=""; already=0
-          for f in *-squashfs-sysupgrade*.itb; do
-            [ -f "$f" ] || continue
-            # 幂等护栏：已经带时间戳的直接跳过，别叠加成 -TS-TS
-            case "$f" in
-              *-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_[0-9][0-9][0-9][0-9][0-9][0-9]*) already=$((already + 1)); continue ;;
-            esac
-            NEW="${f%.itb}-${TS}.itb"
-            if [ -e "$NEW" ]; then
-              echo "::warning::${NEW} 已存在，跳过改名"
-              continue
-            fi
-            mv -f -- "$f" "$NEW"
-            echo "  $f  ->  $NEW"
-            ONLY_OLD="$f"; ONLY_NEW="$NEW"
-          done
-
-          if [ -z "$ONLY_NEW" ]; then
-            if [ "$already" -gt 0 ]; then
-              echo "文件名已带时间戳（${already} 个），跳过改名"
-            else
-              echo "::warning::目录里没有 *-squashfs-sysupgrade.itb，本次不改任何文件名"
-              echo "目录内容: $(ls | tr '\n' ' ')"
-            fi
+          # 附带展开后的 .config：defconfig 之后、真正驱动本次编译的那份。
+          # 同目录的 config.buildinfo 也是它，但那个名字看不出是哪台机器 / 哪份源码编的，
+          # 单独按产物命名规则存一份。放进固件目录 → artifact 和 Release 一起带走，
+          # 以后查「某个包为什么没进固件」直接看这份，不用翻日志。
+          # 名字不带日期：Release tag 固定、靠同名覆盖，带日期会每编一次多留一个 config 资产
+          # （artifact 名里已经有日期，不用靠文件名区分批次）。
+          CFG_NAME="config-${DEVICE_NAME}.config"
+          if [ -f "$BUILD_ROOT/openwrt/.config" ]; then
+            cp -f "$BUILD_ROOT/openwrt/.config" "$CFG_NAME"
+            echo "已附带展开后的配置: $CFG_NAME（$(wc -l < "$CFG_NAME") 行）"
           else
-            # profiles.json 里的文件名 + sha256 必须同步，否则 owut / ASU 指向旧名 404
-            if [ -f profiles.json ]; then
-              python3 - "$ONLY_OLD" "$ONLY_NEW" <<'PY' || echo "::warning::profiles.json 未更新，owut/ASU 可能取不到新固件"
-          import hashlib, json, sys
-
-          old, new = sys.argv[1], sys.argv[2]
-          sha = hashlib.sha256(open(new, 'rb').read()).hexdigest()
-          with open('profiles.json', encoding='utf-8') as fp:
-              data = json.load(fp)
-
-
-          def walk(node):
-              if isinstance(node, dict):
-                  if node.get('name') == old:
-                      node['name'] = new
-                      if 'sha256' in node:
-                          node['sha256'] = sha
-                  for v in node.values():
-                      walk(v)
-              elif isinstance(node, list):
-                  for v in node:
-                      walk(v)
-
-
-          walk(data)
-          with open('profiles.json', 'w', encoding='utf-8') as fp:
-              json.dump(data, fp, ensure_ascii=False, indent=2)
-          PY
-            fi
-
-            # 校验和最后再算：profiles.json 刚改过，先算会自相矛盾
-            rm -f sha256sums
-            sha256sum * > sha256sums 2>/dev/null || true
-
-            echo "已改名: \`${ONLY_OLD}\` -> \`${ONLY_NEW}\`" >> "$GITHUB_STEP_SUMMARY"
+            # 编译都成功了还找不到 .config，多半有人动过工作区；只警告，别让 4 小时的构建白跑
+            echo "::warning::找不到 $BUILD_ROOT/openwrt/.config，本次不附带配置文件"
           fi
 
-          echo "文件名时间戳: ${TS}" >> "$GITHUB_STEP_SUMMARY"
+          echo "FIRMWARE=$PWD" >> "$GITHUB_ENV"
           echo "status=success" >> "$GITHUB_OUTPUT"
 
       - name: Upload firmware directory
@@ -1724,13 +1697,7 @@ jobs:
           echo "release_tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
 
           touch release.txt
-          # 说明里的时间由文件名反推，两处永远同一秒
-          if [ -n "${FW_TS:-}" ]; then
-            BUILD_TIME=$(printf '%s' "$FW_TS" | sed -E \
-              's/^([0-9]{4}-[0-9]{2}-[0-9]{2})_([0-9]{2})([0-9]{2})([0-9]{2})\(Shanghai\)$/\1 \2:\3:\4 (Shanghai)/')
-          else
-            BUILD_TIME="$(date '+%Y-%m-%d %H:%M:%S') (Shanghai)"
-          fi
+          BUILD_TIME="$(date '+%Y-%m-%d %H:%M:%S') (Shanghai)"
           {
             echo "## PonWrt 自动编译固件"
             echo ""
@@ -1751,12 +1718,7 @@ jobs:
             echo '```'
             echo ""
             echo "---"
-            if [ -n "${FW_TS:-}" ]; then
-              echo "> 本 Release 为滚动发布页；追加了文件名时间戳，历史产物**不删除**，按时间戳区分新旧。"
-              echo "> 固件文件名尾部的 \`${FW_TS}\` 是本次编译时间，取时间戳最大的那份刷机即可。"
-            else
-              echo "> 本 Release 为滚动发布页，仅保留最新一次编译产物。"
-            fi
+            echo "> 本 Release 为滚动发布页，仅保留最新一次编译产物。"
             echo "> 安装前请用 AN758x-Stock2UBI 备份原厂 flash，刷机后恢复 PON/校准数据。"
           } >> release.txt
           echo "status=success" >> "$GITHUB_OUTPUT"
@@ -1783,6 +1745,7 @@ jobs:
             ${{ env.FIRMWARE }}/*.tar.gz
             ${{ env.FIRMWARE }}/*.manifest
             ${{ env.FIRMWARE }}/*.json
+            ${{ env.FIRMWARE }}/*.config
 
       - name: Delete workflow runs
         if: steps.compile.outputs.status == 'success'

@@ -28,7 +28,7 @@
 | `ignore_cache` | `false` / `true` | 跳过缓存恢复强制重编（仍会存新一代） |
 | `upload_release` | `true` / `false` | `false` 只留 Artifact |
 | `opt_arm64ce` / `opt_chacha` / `opt_eip93` | `0` / `1` | 加密加速，见文末 |
-| `extra_plugins` | `false`（默认）/ `true` | 编译额外插件（`diy-part3.sh`）|
+| `extra_plugins` | `false`（默认）/ `true` | 额外插件。清单在 `configs/extra-packages.config`：开=逐条写入，关=逐条写成 `not set` |
 
 ### 四个工作流
 
@@ -185,8 +185,35 @@ golang 和 rust 每轮都在从源码自举。
 | `files/sbin/cpuusage` + `scripts/patch-luci-cpuusage.sh` | 概览页 CPU 行改为 `USR: 2% SYS: 1% · CPU0 3% CPU1 0%…`（两次 `/proc/stat` 采差值，USR=`user+nice`、SYS=`system+irq+softirq`）。补丁只换 `popen()` 里一个命令字符串，前端和 ACL 都不动；任一环节失败只 warning，构建不受影响 |
 | `files/sbin/tempinfo` | 概览页温度行：CPU / WiFi / PON 三个温度。顶部 `SHOW_PON_OPTICS=1` 可附带收发光/电流/电压（默认 0，因为 `luci-app-pon-status` 卡片已经完整展示，重复） |
 | `diy-part2.sh` | 默认时区 `Asia/Shanghai`、5G 国家码 `CN` / 信道 `auto` / 频宽 `HE160`（不支持时回落到 `HE80`）；固件版本信息保持源码默认，不追加作者与构建时间 |
-| `diy-part3.sh` | 可选额外插件（workflow 开关 `extra_plugins`，默认关）|
+| `configs/extra-packages.config` | 额外插件清单：一行一个 `CONFIG_符号=值`，由 workflow 装配 `.config` 时逐条写入。加减插件只改这个文件，workflow 不用动。开关 `extra_plugins=false` 时不是「跳过」，而是逐条写成 `# ... is not set` |
 | `files/etc/uci-defaults/` | 首启强制刷时区与无线参数的兜底脚本 |
+
+### 额外插件（`configs/extra-packages.config`）
+
+清单就是 kconfig / `diffconfig` 语法，一行一条，从 `make menuconfig` 里拷一行进来即可：
+
+```kconfig
+# LuCI ---> Applications ---> 动态域名 DNS（ddns-scripts 由依赖带出）
+CONFIG_PACKAGE_luci-app-ddns=y
+
+# 显式不装：用来盖掉机型 config 里的 =y
+CONFIG_PACKAGE_luci-app-wol=n
+```
+
+`workflow` 在**装配 `.config` 那一步**（`Load custom configuration`，机型配置追加完之后）读它逐条写入，
+再交给 `defconfig` 展开 —— 和「基础配置 + 机型 + 额外插件」一次成型的做法一致，不需要单独的 diy 脚本。
+三点容易踩：
+
+- **开关为 `false` 时不是「跳过」，而是逐条写成 `# ... is not set`。** 跳过的话，机型 config 里残留的
+  同名 `=y` 会让「已关闭额外插件」看起来没生效；现在关就是真的关，构建末尾还会复核一遍有没有漏网的 `=y`。
+- **机型 config 里已经固化 `=y` 的包不要放进来。** 因为「关」会显式置成 `not set`，放进来就等于
+  关一次额外插件就把它从固件里删掉。`autocore`（概览页数据）和 `luci-theme-argon`（默认主题）
+  16 个机型全部 `=y`，所以属于基础功能、不在清单里，也不受开关影响。
+- **只放包 / 功能符号，不放 `CONFIG_TARGET_*`。** 机型符号会被 `defconfig` 按机型重新推导后覆盖，
+  写在清单里既不生效也难排查。
+
+工作流的「额外插件复核」直接读这个文件，不再维护第二份包名列表；`defconfig` 静默剔除（源码 feeds 里
+没有该包）时只 warning 不阻断，看 `额外插件未进入 .config` 那行即可。
 
 ## NPU 固件
 
@@ -239,11 +266,13 @@ openssl speed -evp chacha20-poly1305
 | 缓存「命中」却仍然全量重编 | `prepare` 那步的三件事是否都做了；`Build host go/rust from source` 的 warning |
 | 缓存永远 miss | `source` / `branch` / `soc` / `prebuilt_host` 四项是否和预热时一致 |
 | `artifacts` 上传失败 | Artifact 存储配额（默认保留 90 天，几份固件就可能超） |
+| 某个包「明明选了却没进固件」 | 产物里的 `config-<机型>.config` —— 就是 `defconfig` 之后真正驱动编译的那份 `.config`，直接看该符号在不在、是 `=y` 还是 `not set`，不用翻日志 |
 | NPU 不绑定 | `dmesg \| grep -i npu`、`/lib/firmware/airoha/` 里的文件名和大小 |
 
 ## 已知限制
 
 - 只有 `scope=firmware` 且编译成功才发 Release；`toolchain-only` 不发，空固件目录会跳过。
 - Release tag 固定为 `<机型>-<分支>`，每次覆盖，所以每个机型只有一份固件，不是「保留最近 N 份」。
+  固件文件名保持 OpenWrt 原名（如 `...-squashfs-sysupgrade.itb`，不带日期/时区），重编时同名资产被覆盖。
 - NPU 只在三层路由模式生效，纯 AP 桥接时整机吞吐会掉到 2000 Mbps 左右。
 - `repository_dispatch` 触发时所有 choice 输入都是空，走的是各 env 的回退值。
