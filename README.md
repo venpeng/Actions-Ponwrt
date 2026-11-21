@@ -89,7 +89,8 @@ CI 只能证明「编译通过、镜像里固件齐全」，不能证明「加�
 
 ## 插件开关（`diy-part1.sh`）
 
-全部默认开启，开关与 `configs/an7581.config` / `an7583.config` 里的 `=y` 一一对应：
+默认只开 `ADD_AIROHA_NPU` / `ADD_LUCI_APP` / `ADD_FTTR`（本机用得上），其余开关都是 `false`。
+开关须与 `configs/an7581.config` / `an7583.config` 里的 `=y` 一一对应：
 
 | 开关 | 包 | 备注 |
 |---|---|---|
